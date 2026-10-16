@@ -1,4 +1,4 @@
-// main запускает HTTP- и gRPC-сервис notification платформы CBL.
+// main starts the HTTP and gRPC service of the CBL notification platform.
 package main
 
 import (
@@ -20,7 +20,7 @@ import (
 	"google.golang.org/grpc/reflection"
 )
 
-// main поднимает gRPC-сервер сервиса, административный HTTP-сервер и сервер метрик.
+// main starts the gRPC server of the service, the administrative HTTP server and the metrics server.
 func main() {
 	log, err := zap.NewProduction()
 	if err != nil {
@@ -95,7 +95,7 @@ func main() {
 	log.Info("shutdown finished")
 }
 
-// metricsHandler отдает заглушку метрик до задачи 0.7.
+// metricsHandler serves a metrics stub until task 0.7.
 func metricsHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
@@ -105,7 +105,7 @@ func metricsHandler() http.Handler {
 	return mux
 }
 
-// getenv возвращает значение переменной окружения или значение по умолчанию.
+// getenv returns the environment variable value or the default value.
 func getenv(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v

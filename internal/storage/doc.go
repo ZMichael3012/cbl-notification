@@ -1,3 +1,3 @@
-// Пакет storage содержит доступ к хранилищам сервиса notification:
-// GORM-репозитории, миграции и интеграцию с outbox/inbox.
+// Package storage contains access to the storages of the notification service:
+// GORM repositories, migrations and outbox/inbox integration.
 package storage
