@@ -61,11 +61,11 @@ type Store interface {
 	// RecordAttempt journals one attempt.
 	RecordAttempt(ctx context.Context, attempt storage.AttemptRecord) error
 	// MarkDelivered marks the delivery delivered.
-	MarkDelivered(ctx context.Context, deliveryID string, attempts int) error
+	MarkDelivered(ctx context.Context, deliveryID string, attempts, retryAttempts int) error
 	// ScheduleRetry schedules the next attempt.
-	ScheduleRetry(ctx context.Context, deliveryID string, attempts int, next time.Time, lastError string) error
+	ScheduleRetry(ctx context.Context, deliveryID string, attempts, retryAttempts int, next time.Time, lastError string) error
 	// MarkFailed marks the delivery failed.
-	MarkFailed(ctx context.Context, deliveryID string, attempts int, lastError string) error
+	MarkFailed(ctx context.Context, deliveryID string, attempts, retryAttempts int, lastError string) error
 }
 
 // EventHandler consumes one platform event family through the kit inbox and
@@ -335,6 +335,7 @@ type Dispatcher struct {
 	now            func() time.Time
 	interval       time.Duration
 	attemptTimeout time.Duration
+	schedule       []time.Duration
 	batch          int
 	log            *zap.Logger
 }
@@ -380,6 +381,16 @@ func WithDispatcherAttemptTimeout(timeout time.Duration) DispatcherOption {
 	}
 }
 
+// WithDispatcherSchedule overrides the contract retry schedule (stands, e2e
+// and load only; the env variable is NOTIFICATION_RETRY_SCHEDULE).
+func WithDispatcherSchedule(schedule []time.Duration) DispatcherOption {
+	return func(d *Dispatcher) {
+		if len(schedule) > 0 {
+			d.schedule = schedule
+		}
+	}
+}
+
 // NewDispatcher creates the delivery worker; a nil logger is silent.
 func NewDispatcher(store Store, key []byte, log *zap.Logger, opts ...DispatcherOption) *Dispatcher {
 	if log == nil {
@@ -391,6 +402,7 @@ func NewDispatcher(store Store, key []byte, log *zap.Logger, opts ...DispatcherO
 		now:            time.Now,
 		interval:       time.Second,
 		attemptTimeout: 10 * time.Second,
+		schedule:       append([]time.Duration(nil), RetrySchedule...),
 		batch:          20,
 		log:            log,
 	}
@@ -446,14 +458,14 @@ func (d *Dispatcher) deliver(ctx context.Context, delivery storage.DeliveryRecor
 	endpoint, err := d.store.EndpointByID(ctx, delivery.EndpointID)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
-			return d.store.MarkFailed(ctx, delivery.ID, attempt, "endpoint not found")
+			return d.store.MarkFailed(ctx, delivery.ID, attempt, delivery.RetryAttempts, "endpoint not found")
 		}
 		// A transient store failure: the lease expires and the delivery is
 		// reclaimed (at-least-once, T-NOTIFY-15).
 		return fmt.Errorf("usecase: load delivery endpoint: %w", err)
 	}
 	if endpoint.MerchantID != delivery.MerchantID {
-		return d.store.MarkFailed(ctx, delivery.ID, attempt, "endpoint owner mismatch")
+		return d.store.MarkFailed(ctx, delivery.ID, attempt, delivery.RetryAttempts, "endpoint owner mismatch")
 	}
 	secret, err := domain.DecryptSecret(d.key, endpoint.ID, endpoint.SecretCiphertext, endpoint.SecretNonce)
 	if err != nil {
@@ -478,15 +490,16 @@ func (d *Dispatcher) settle(ctx context.Context, delivery storage.DeliveryRecord
 		d.log.Warn("delivery attempt journal failed", zap.String("delivery_id", delivery.ID), zap.Error(recordErr))
 	}
 	if sendErr == nil {
-		return d.store.MarkDelivered(ctx, delivery.ID, attempt)
+		return d.store.MarkDelivered(ctx, delivery.ID, attempt, delivery.RetryAttempts)
 	}
-	if attempt > len(RetrySchedule) {
+	retry := delivery.RetryAttempts + 1
+	if retry > len(d.schedule) {
 		d.log.Warn("delivery retries exhausted",
 			zap.String("delivery_id", delivery.ID),
 			zap.Int("attempts", attempt))
-		return d.store.MarkFailed(ctx, delivery.ID, attempt, failure)
+		return d.store.MarkFailed(ctx, delivery.ID, attempt, retry, failure)
 	}
-	return d.store.ScheduleRetry(ctx, delivery.ID, attempt, sentAt.Add(RetrySchedule[attempt-1]), failure)
+	return d.store.ScheduleRetry(ctx, delivery.ID, attempt, retry, sentAt.Add(d.schedule[retry-1]), failure)
 }
 
 // errorText renders a bounded failure text without control characters and

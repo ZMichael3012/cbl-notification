@@ -97,7 +97,7 @@ func (s *fakeDeliveryStore) RecordAttempt(_ context.Context, attempt storage.Att
 }
 
 // MarkDelivered marks the delivery delivered.
-func (s *fakeDeliveryStore) MarkDelivered(_ context.Context, deliveryID string, _ int) error {
+func (s *fakeDeliveryStore) MarkDelivered(_ context.Context, deliveryID string, _ int, _ int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.statuses[deliveryID] = "delivered"
@@ -105,7 +105,7 @@ func (s *fakeDeliveryStore) MarkDelivered(_ context.Context, deliveryID string, 
 }
 
 // ScheduleRetry schedules the next attempt.
-func (s *fakeDeliveryStore) ScheduleRetry(_ context.Context, deliveryID string, _ int, next time.Time, lastError string) error {
+func (s *fakeDeliveryStore) ScheduleRetry(_ context.Context, deliveryID string, _ int, _ int, next time.Time, lastError string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.statuses[deliveryID] = "pending"
@@ -115,7 +115,7 @@ func (s *fakeDeliveryStore) ScheduleRetry(_ context.Context, deliveryID string, 
 }
 
 // MarkFailed marks the delivery failed.
-func (s *fakeDeliveryStore) MarkFailed(_ context.Context, deliveryID string, _ int, lastError string) error {
+func (s *fakeDeliveryStore) MarkFailed(_ context.Context, deliveryID string, _ int, _ int, lastError string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.statuses[deliveryID] = "failed"
@@ -256,6 +256,7 @@ func TestDispatcherRetriesAndFails(t *testing.T) {
 	// The exhausted schedule marks the delivery failed.
 	exhausted := delivery
 	exhausted.Attempts = len(usecase.RetrySchedule)
+	exhausted.RetryAttempts = len(usecase.RetrySchedule)
 	store.claimed = []storage.DeliveryRecord{exhausted}
 	require.NoError(t, dispatcher.ProcessDue(context.Background()))
 	assert.Equal(t, "failed", store.statuses[delivery.ID])

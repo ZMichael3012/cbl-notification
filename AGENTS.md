@@ -17,7 +17,9 @@ Out of scope: other platform services; interaction only through `cbl-protos` con
 
 - REST: administrative /healthz, /readyz
 - gRPC: NotificationService server (`billing/notification/v1`:
-  RegisterWebhookEndpoint - endpoint registration and secret issuance, CBL-8.1)
+  RegisterWebhookEndpoint - endpoint registration and secret issuance, CBL-8.1;
+  ListWebhookDeliveries, GetDeliveryStats, ResendWebhookDelivery - the operator
+  journal reads and the manual resend, CBL-8.3, additive CF-3)
 - Kafka produces: none
 - Kafka consumes: payment.events, payout.events, recon.alerts (CBL-8.2)
 - Storage: PostgreSQL notification (`webhook_endpoints` - the merchant endpoint with
@@ -88,6 +90,8 @@ pipeline with a WARN, T-NOTIFY-10), `NOTIFICATION_PAYMENTS_GROUP` (default
 `cbl-notification-payouts`), `NOTIFICATION_RECON_GROUP` (default
 `cbl-notification-recon`), `NOTIFICATION_DISPATCH_INTERVAL` (default 1s),
 `NOTIFICATION_ATTEMPT_TIMEOUT` (default 10s, it also sizes the claim lease);
+`NOTIFICATION_RETRY_SCHEDULE` (comma-separated ascending durations, 1..20 entries;
+empty keeps the contract schedule; stands/e2e only, T-NOTIFY-20);
 `SCHEMA_REGISTRY_URL`, `REDIS_ADDR` - reserved.
 
 ## 6. Development rules
@@ -130,6 +134,11 @@ consumer lag; dashboards after task 0.7.
 | T-NOTIFY-16 | The consumers start at the topic end; the delivery row stores the source event id and (source_event_id, endpoint_id) is unique (a replay is skipped) | a new group or a rename cannot deliver old events twice per endpoint | events produced while the service is down are not delivered (the REST API remains the source of truth) |
 | T-NOTIFY-17 | The delivery-time SSRF guard resolves the host, rejects non-public addresses and dials the pinned IP; the transport errors are classified without the URL | T-NOTIFY-03 is closed; no URL/query token in the logs or the journal | a DNS resolution per connection; a public IP change is not re-resolved (anti-rebinding) |
 | T-NOTIFY-18 | The event amounts are validated with the kit money (decimals range, non-negative) before rendering | a poison pill becomes an invalid event and a DLQ; the CF-3 Asset regex holds | a producer bug surfaces in the retry/DLQ |
+| T-NOTIFY-19 | The resend is structurally idempotent (conditional reset); the idempotency_key is required but not persisted | no extra table; a repeated call cannot duplicate the send | the repeated response reflects later state (still pending) |
+| T-NOTIFY-20 | The retry schedule is configurable for stands (NOTIFICATION_RETRY_SCHEDULE) | fast e2e/load exhaustion; the contract default holds in prod | a stand misconfiguration can hide the schedule |
+| T-NOTIFY-21 | The listing returns the body SHA-256, not the body | no payloads or secrets in operator UIs | a body inspection needs the DB |
+| T-NOTIFY-22 | A resend of a delivered delivery is FAILED_PRECONDITION | no duplicate merchant events with the same evt_ id | a deliberate replay would be a 12.x feature with a new event id |
+| T-NOTIFY-23 | attempts (the monotonic journal number) and retry_attempts (the schedule position) are split | the resend restarts the schedule without (delivery_id, attempt) collisions; the journal stays append-only | one more column and the backfill |
 
 ## 9. Known issues
 
@@ -146,6 +155,7 @@ consumer lag; dashboards after task 0.7.
 | CBL-16.12 | 2026-10-16 | done (English comments and documentation; e2e run instruction `test/e2e/E2E.md` added as a plan, scenarios arrive with CBL-8.x; no code changes) | `.specs/CBL-16.12-conventions.md` | this commit |
 | CBL-8.1 | 2026-10-19 | done, review closed (webhook endpoint registration and signing secrets: the frozen NotificationService/RegisterWebhookEndpoint, the CF-3 catalog (11 types) with the contract-sync test, the SSRF URL guards (https, no credentials/internal names/private literals/CGNAT/0.0.0.0/8/IPv6 zones/trailing dot), the 32-byte CSPRNG secret encrypted with AES-256-GCM (the endpoint id is the AAD, `secret_key_version`), the idempotent registration keyed by (merchant, key) with the normalized hash and resolved races, the frozen url conflict (409 `webhook_endpoint_exists`), the `webhook_endpoints` migration, the gRPC server with the mismatching `x-merchant-id` rejection and raw-error logging, the fail-closed startup (non-zero exit); 4 review passes, findings closed (the committed key default removed, JSONB/URL-unique/key-version recorded, the normalized hash, the SSRF gaps, the logging, the tests, the docs); unit+integration+the stand e2e green, coverage 86.0% with -coverpkg, lint 0) | `.specs/CBL-8.1-webhook-endpoints.md` | this commit |
 | CBL-8.2 | 2026-10-19 | done, review closed (signed webhook delivery: the payment/payout/recon kit-inbox consumers with the CF-3 mapping (invoice/payout/refund, the refund marker, the terminal states, the skipped types, the kit-money amount validation), the envelope/signature (evt_ ids, the t/v1 hmac over the stored body, the event id header), the DB-driven dispatcher with the claim lease, the per-attempt time and the contract retry schedule (1s/5s/30s/2m/15m/1h, 7 attempts), the delivery journal, the delivery-time SSRF guard (GuardedDial: resolve, reject non-public, pin), the classified transport errors without the URL, the source-event replay dedupe and the AtEnd offset policy, the start-at-end consumers and the ordered shutdown; 4 review passes with 3 blocking findings closed (the SSRF guard, the offset replay, the untrusted decimals poison pill) plus the lease/time-base, the URL redaction and the test matrix; unit+integration+the stand e2e green, coverage 83.4% with -coverpkg, lint 0) | `.specs/CBL-8.2-delivery.md` | this commit |
+| CBL-8.3 | 2026-10-19 | done, review closed (manual resend and delivery statistics: ListWebhookDeliveries with the keyset cursor (base64 created_at+uuid), the merchant/endpoint/status/type/window filters, the 90-day window and page bounds; GetDeliveryStats with the 24h default window and the terminal-only success rate; ResendWebhookDelivery with the conditional failed reset, the attempts/retry_attempts split (the journal numbering continues, the schedule round restarts), the pending no-op, the delivered FAILED_PRECONDITION, the concurrent single-winner; the listing index migration 00005; the stand-only NOTIFICATION_RETRY_SCHEDULE with the startup validation; the body digest instead of the body; 4 review passes, the blocking resend-numbering finding closed; unit+integration+the stand e2e green, coverage 82.7% with -coverpkg, lint 0) | `.specs/CBL-8.3-resend-and-stats.md` | this commit |
 
 ## 11. Runbook
 
@@ -189,6 +199,21 @@ Delivery pipeline (8.2):
 7. The consumer offset policy: the groups start at the topic end (T-NOTIFY-16); a
    renamed group replays from the end, and the `(source_event_id, endpoint_id)` unique
    skips the deliveries already created for an endpoint.
+
+Operator delivery reads and resend (8.3):
+
+1. The listing: `ListWebhookDeliveries` scoped by `merchant_id`, ordered `created_at
+   DESC, id DESC`, keyset cursor in `page_token`; the response carries the body
+   SHA-256, not the body (T-NOTIFY-21). The RPCs inherit KI-notification-02 (no
+   authN): do not expose 9090 outside the trusted network.
+2. The statistics: `GetDeliveryStats` defaults to `now-24h..now`; the success rate
+   counts `delivered / (delivered + failed)` only.
+3. The resend: `ResendWebhookDelivery` only resets a `failed` row (the conditional
+   update, single-winner); a pending row is a no-op; a delivered row is
+   `FAILED_PRECONDITION` (T-NOTIFY-22); the attempt journal is append-only and the
+   number continues across rounds (T-NOTIFY-23).
+4. The schedule override: `NOTIFICATION_RETRY_SCHEDULE=1s` on the stand makes the
+   exhaustion fast for GE-6; an invalid value fails the startup (fail-closed).
 
 Typical incidents: dependency unavailability, error growth, processing lag (8.2);
 actions: check health/metrics, logs with request_id, the Kafka consumer group and outbox

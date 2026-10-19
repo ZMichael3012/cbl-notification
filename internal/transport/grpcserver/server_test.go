@@ -5,6 +5,7 @@ import (
 	"context"
 	"net"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -14,8 +15,11 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	notificationv1 "github.com/cbl/cbl-protos/gen/go/billing/notification/v1"
+
+	"github.com/cbl/cbl-kit/grpcmw"
 
 	"github.com/cbl/cbl-notification/internal/storage"
 	"github.com/cbl/cbl-notification/internal/transport/grpcserver"
@@ -57,7 +61,7 @@ func newClient(t *testing.T) notificationv1.NotificationServiceClient {
 	t.Helper()
 	listener := bufconn.Listen(1 << 20)
 	server := grpc.NewServer()
-	grpcserver.NewServer(usecase.NewRegisterService(&memStore{}, bytes.Repeat([]byte{5}, 32)), nil).Register(server)
+	grpcserver.NewServer(usecase.NewRegisterService(&memStore{}, bytes.Repeat([]byte{5}, 32)), nil, nil).Register(server)
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(server.Stop)
 
@@ -161,4 +165,128 @@ func TestRegisterWebhookEndpointMerchantMetadata(t *testing.T) {
 	matching := metadata.AppendToOutgoingContext(context.Background(), "x-merchant-id", testMerchantID)
 	_, err = client.RegisterWebhookEndpoint(matching, request)
 	require.NoError(t, err)
+}
+
+// fakeAdmin implements grpcserver.AdminPort.
+type fakeAdmin struct {
+	page   usecase.DeliveryPage
+	stats  usecase.DeliveryStats
+	resend usecase.ResendResult
+	err    error
+}
+
+// List returns the preconfigured page.
+func (f *fakeAdmin) List(context.Context, usecase.ListQuery) (usecase.DeliveryPage, error) {
+	return f.page, f.err
+}
+
+// Stats returns the preconfigured aggregates.
+func (f *fakeAdmin) Stats(context.Context, string, *time.Time, *time.Time) (usecase.DeliveryStats, error) {
+	return f.stats, f.err
+}
+
+// Resend returns the preconfigured result.
+func (f *fakeAdmin) Resend(context.Context, string, string) (usecase.ResendResult, error) {
+	return f.resend, f.err
+}
+
+// newAdminClient builds the gRPC client over an in-process listener with the
+// fake operator service.
+func newAdminClient(t *testing.T, admin *fakeAdmin) notificationv1.NotificationServiceClient {
+	t.Helper()
+	listener := bufconn.Listen(1 << 20)
+	server := grpc.NewServer()
+	grpcserver.NewServer(usecase.NewRegisterService(&memStore{}, bytes.Repeat([]byte{5}, 32)), admin, nil).Register(server)
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(server.Stop)
+
+	conn, err := grpc.NewClient("passthrough:///bufnet",
+		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) { return listener.DialContext(ctx) }),
+		grpc.WithTransportCredentials(insecure.NewCredentials()))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	return notificationv1.NewNotificationServiceClient(conn)
+}
+
+func TestListWebhookDeliveriesMapsThePage(t *testing.T) {
+	delivered := time.Date(2026, 10, 19, 12, 30, 0, 0, time.UTC)
+	next := time.Date(2026, 10, 19, 12, 31, 0, 0, time.UTC)
+	admin := &fakeAdmin{page: usecase.DeliveryPage{
+		Deliveries: []storage.DeliveryRecord{{
+			ID: "01a154e0-0000-7000-8000-000000000201", EventID: "evt_01a154e0-0000-7000-8000-000000000202",
+			EndpointID: "01a154e0-0000-7000-8000-000000000101", EventType: "invoice.completed",
+			Status: storage.DeliveryDelivered, Attempts: 1, NextAttemptAt: &next, LastError: "",
+			CreatedAt: delivered.Add(-time.Minute), DeliveredAt: &delivered, Body: []byte(`{"id":"evt_x"}`),
+		}},
+		NextToken: "cursor-1",
+	}}
+	client := newAdminClient(t, admin)
+	response, err := client.ListWebhookDeliveries(context.Background(), &notificationv1.ListWebhookDeliveriesRequest{
+		MerchantId: testMerchantID, PageSize: 20,
+	})
+	require.NoError(t, err)
+	require.Len(t, response.GetDeliveries(), 1)
+	row := response.GetDeliveries()[0]
+	assert.Equal(t, "01a154e0-0000-7000-8000-000000000201", row.GetDeliveryId())
+	assert.Equal(t, "invoice.completed", row.GetEventType())
+	assert.Equal(t, "delivered", row.GetStatus())
+	assert.Equal(t, int32(1), row.GetAttempts())
+	assert.Equal(t, "cursor-1", response.GetNextPageToken())
+	assert.NotEmpty(t, row.GetBodySha256())
+	assert.Equal(t, delivered, row.GetDeliveredAt().AsTime())
+}
+
+func TestGetDeliveryStatsAndResend(t *testing.T) {
+	next := time.Date(2026, 10, 19, 13, 0, 0, 0, time.UTC)
+	admin := &fakeAdmin{
+		stats: usecase.DeliveryStats{Total: 4, Pending: 1, Delivered: 2, Failed: 1, SuccessRate: 2.0 / 3.0},
+		resend: usecase.ResendResult{Delivery: storage.DeliveryRecord{
+			ID: "01a154e0-0000-7000-8000-000000000201", Status: storage.DeliveryPending,
+			Attempts: 7, RetryAttempts: 0, NextAttemptAt: &next,
+		}},
+	}
+	client := newAdminClient(t, admin)
+
+	stats, err := client.GetDeliveryStats(context.Background(), &notificationv1.GetDeliveryStatsRequest{MerchantId: testMerchantID})
+	require.NoError(t, err)
+	assert.Equal(t, int64(4), stats.GetTotal())
+	assert.Equal(t, int64(1), stats.GetFailed())
+	assert.InDelta(t, 2.0/3.0, stats.GetSuccessRate(), 1e-9)
+
+	resend, err := client.ResendWebhookDelivery(context.Background(), &notificationv1.ResendWebhookDeliveryRequest{
+		DeliveryId: "01a154e0-0000-7000-8000-000000000201", IdempotencyKey: "key-1",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "pending", resend.GetStatus())
+	assert.Equal(t, int32(7), resend.GetAttempts())
+	assert.Equal(t, next, resend.GetNextAttemptAt().AsTime())
+}
+
+func TestDeliveryErrorMapping(t *testing.T) {
+	cases := map[string]struct {
+		err  error
+		code codes.Code
+	}{
+		"not found":      {grpcmw.E(grpcmw.KindNotFound, "delivery_not_found", "missing", nil), codes.NotFound},
+		"not resendable": {grpcmw.E(grpcmw.KindFailedPrecondition, "delivery_not_resendable", "delivered", nil), codes.FailedPrecondition},
+		"invalid":        {grpcmw.E(grpcmw.KindInvalidArgument, "invalid_request", "bad", nil), codes.InvalidArgument},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			client := newAdminClient(t, &fakeAdmin{err: tc.err})
+			_, err := client.ResendWebhookDelivery(context.Background(), &notificationv1.ResendWebhookDeliveryRequest{
+				DeliveryId: "01a154e0-0000-7000-8000-000000000201", IdempotencyKey: "key-1",
+			})
+			require.Error(t, err)
+			assert.Equal(t, tc.code, status.Code(err))
+		})
+	}
+
+	invalidWindow := newAdminClient(t, &fakeAdmin{})
+	_, err := invalidWindow.ListWebhookDeliveries(context.Background(), &notificationv1.ListWebhookDeliveriesRequest{
+		MerchantId: testMerchantID,
+		From:       &timestamppb.Timestamp{Seconds: 1, Nanos: -1},
+	})
+	require.Error(t, err)
+	assert.Equal(t, codes.InvalidArgument, status.Code(err))
 }

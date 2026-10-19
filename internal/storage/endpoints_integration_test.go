@@ -52,7 +52,7 @@ func setupNotificationDB(t *testing.T) *gorm.DB {
 
 	var version int64
 	require.NoError(t, db.Raw("SELECT max(version_id) FROM goose_db_version").Scan(&version).Error)
-	assert.Equal(t, int64(4), version, "the endpoint, outbox, inbox and delivery migrations are applied")
+	assert.Equal(t, int64(5), version, "the endpoint, outbox, inbox, delivery and resend migrations are applied")
 	return db
 }
 
@@ -165,13 +165,13 @@ func TestIntegrationDeliveryJournal(t *testing.T) {
 	require.NoError(t, deliveries.RecordAttempt(ctx, storage.AttemptRecord{
 		DeliveryID: due.ID, Attempt: 1, SentAt: now, HTTPStatus: 500, Error: "boom",
 	}))
-	require.NoError(t, deliveries.ScheduleRetry(ctx, due.ID, 1, now.Add(time.Second), "boom"))
+	require.NoError(t, deliveries.ScheduleRetry(ctx, due.ID, 1, 1, now.Add(time.Second), "boom"))
 	claimed, err = deliveries.ClaimDue(ctx, now.Add(2*time.Second), 15*time.Second, 10)
 	require.NoError(t, err)
 	require.Len(t, claimed, 1)
 	assert.Equal(t, 1, claimed[0].Attempts)
 
-	require.NoError(t, deliveries.MarkDelivered(ctx, due.ID, 2))
+	require.NoError(t, deliveries.MarkDelivered(ctx, due.ID, 2, 1))
 	claimed, err = deliveries.ClaimDue(ctx, now.Add(time.Hour), 15*time.Second, 10)
 	require.NoError(t, err)
 	assert.Empty(t, claimed, "a delivered row is not claimed")

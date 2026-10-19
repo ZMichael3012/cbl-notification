@@ -148,7 +148,7 @@ func TestDispatcherRetryScheduleAttempts(t *testing.T) {
 		delivery := storage.DeliveryRecord{
 			ID: "01a154e0-0000-7000-8000-000000000201", EventID: "evt_x",
 			MerchantID: testMerchantID, EndpointID: store.endpoints[0].ID, Body: []byte(`{}`),
-			Attempts: attempt - 1,
+			Attempts: attempt - 1, RetryAttempts: attempt - 1,
 		}
 		store.claimed = []storage.DeliveryRecord{delivery}
 		dispatcher := usecase.NewDispatcher(store, key, nil,
@@ -166,7 +166,7 @@ func TestDispatcherRetryScheduleAttempts(t *testing.T) {
 	delivery := storage.DeliveryRecord{
 		ID: "01a154e0-0000-7000-8000-000000000202", EventID: "evt_y",
 		MerchantID: testMerchantID, EndpointID: store.endpoints[0].ID, Body: []byte(`{}`),
-		Attempts: len(usecase.RetrySchedule),
+		Attempts: len(usecase.RetrySchedule), RetryAttempts: len(usecase.RetrySchedule),
 	}
 	store.claimed = []storage.DeliveryRecord{delivery}
 	dispatcher := usecase.NewDispatcher(store, make([]byte, 32), nil,

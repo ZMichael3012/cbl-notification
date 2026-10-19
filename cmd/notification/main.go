@@ -65,6 +65,7 @@ func main() {
 
 	endpoints := storage.NewEndpointRepository(db)
 	register := usecase.NewRegisterService(endpoints, secretKey)
+	admin := usecase.NewAdminService(storage.NewDeliveryRepository(db))
 
 	closePipeline, err := startDeliveryPipeline(ctx, log, db, endpoints, secretKey)
 	if err != nil {
@@ -98,7 +99,7 @@ func main() {
 	healthSrv.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
 	grpc_health_v1.RegisterHealthServer(grpcSrv, healthSrv)
 	reflection.Register(grpcSrv)
-	grpcserver.NewServer(register, log).Register(grpcSrv)
+	grpcserver.NewServer(register, admin, log).Register(grpcSrv)
 
 	grpcListener, err := net.Listen("tcp", grpcAddr)
 	if err != nil {
@@ -220,9 +221,14 @@ func startDeliveryPipeline(ctx context.Context, log *zap.Logger, db *gorm.DB, en
 		publisher.Close()
 	}
 	store := webhookStore{EndpointRepository: endpoints, DeliveryRepository: storage.NewDeliveryRepository(db)}
+	schedule, err := usecase.ParseRetrySchedule(os.Getenv("NOTIFICATION_RETRY_SCHEDULE"))
+	if err != nil {
+		return nil, fmt.Errorf("retry schedule: %w", err)
+	}
 	dispatcher := usecase.NewDispatcher(store, secretKey, log,
 		usecase.WithDispatcherInterval(parseDuration(getenv("NOTIFICATION_DISPATCH_INTERVAL", "1s"), time.Second)),
-		usecase.WithDispatcherAttemptTimeout(parseDuration(getenv("NOTIFICATION_ATTEMPT_TIMEOUT", "10s"), 10*time.Second)))
+		usecase.WithDispatcherAttemptTimeout(parseDuration(getenv("NOTIFICATION_ATTEMPT_TIMEOUT", "10s"), 10*time.Second)),
+		usecase.WithDispatcherSchedule(schedule))
 	go func() {
 		if runErr := dispatcher.Run(ctx); runErr != nil && !errors.Is(runErr, context.Canceled) {
 			log.Error("delivery dispatcher stopped", zap.Error(runErr))
