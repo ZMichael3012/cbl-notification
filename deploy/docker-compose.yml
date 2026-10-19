@@ -62,12 +62,17 @@ services:
   notification:
     profiles: ["app"]
     build:
-      context: ..
+      context: ../..
+      dockerfile: cbl-notification/Dockerfile
     environment:
       HTTP_ADDR: ":8090"
       GRPC_ADDR: ":9090"
       METRICS_ADDR: ":9290"
       PG_DSN: postgres://cbl:cbl@postgres:5432/notification?sslmode=disable
+      MIGRATIONS_DIR: /app/migrations
+      # AES-256 key of the signing secret encryption: 64 hex characters, set in
+      # the gitignored deploy/.env (openssl rand -hex 32), never committed.
+      NOTIFICATION_SECRET_KEY: ${NOTIFICATION_SECRET_KEY:?set NOTIFICATION_SECRET_KEY (64 hex characters, see .env.example)}
       KAFKA_BROKERS: kafka:29092
     ports:
       - "8090:8090"
