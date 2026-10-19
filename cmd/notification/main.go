@@ -10,10 +10,12 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/twmb/franz-go/pkg/kgo"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
@@ -23,6 +25,9 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/cbl/cbl-kit/grpcmw"
+	"github.com/cbl/cbl-kit/inbox"
+	"github.com/cbl/cbl-kit/inbox/kafkaconsumer"
+	"github.com/cbl/cbl-kit/outbox/kafkapub"
 	"github.com/cbl/cbl-kit/storagex"
 
 	"github.com/cbl/cbl-notification/internal/domain"
@@ -51,6 +56,7 @@ func main() {
 		log.Error("database startup failed", zap.Error(err))
 		os.Exit(1)
 	}
+	defer closeDatabase(db, log)
 	secretKey, err := loadSecretKey()
 	if err != nil {
 		log.Error("secret key startup failed", zap.Error(err))
@@ -59,6 +65,13 @@ func main() {
 
 	endpoints := storage.NewEndpointRepository(db)
 	register := usecase.NewRegisterService(endpoints, secretKey)
+
+	closePipeline, err := startDeliveryPipeline(ctx, log, db, endpoints, secretKey)
+	if err != nil {
+		log.Error("delivery pipeline startup failed", zap.Error(err))
+		os.Exit(1)
+	}
+	defer closePipeline()
 
 	router := gin.New()
 	router.Use(gin.Recovery())
@@ -171,6 +184,118 @@ func pingDatabase(ctx context.Context, db *gorm.DB) error {
 		return err
 	}
 	return sqlDB.PingContext(ctx)
+}
+
+// webhookStore combines the endpoint and delivery repositories into the
+// delivery pipeline persistence port.
+type webhookStore struct {
+	*storage.EndpointRepository
+	*storage.DeliveryRepository
+}
+
+// EndpointByID resolves the delivery target (the endpoint repository method).
+func (s webhookStore) EndpointByID(ctx context.Context, id string) (storage.EndpointRecord, error) {
+	return s.ByID(ctx, id)
+}
+
+// startDeliveryPipeline wires the Kafka consumers and the dispatcher; without
+// KAFKA_BROKERS the pipeline stays disabled (registration only), FR-6. The
+// returned closer stops the consumers and the publisher before the caller
+// closes the database.
+func startDeliveryPipeline(ctx context.Context, log *zap.Logger, db *gorm.DB, endpoints *storage.EndpointRepository, secretKey []byte) (func(), error) {
+	brokers := splitCSV(getenv("KAFKA_BROKERS", ""))
+	if len(brokers) == 0 {
+		log.Warn("kafka is not configured: the delivery pipeline is disabled")
+		return func() {}, nil
+	}
+	publisher, err := kafkapub.New(brokers)
+	if err != nil {
+		return nil, fmt.Errorf("kafka publisher: %w", err)
+	}
+	runners := make([]*kafkaconsumer.Runner, 0, 3)
+	closeAll := func() {
+		for _, runner := range runners {
+			runner.Close()
+		}
+		publisher.Close()
+	}
+	store := webhookStore{EndpointRepository: endpoints, DeliveryRepository: storage.NewDeliveryRepository(db)}
+	dispatcher := usecase.NewDispatcher(store, secretKey, log,
+		usecase.WithDispatcherInterval(parseDuration(getenv("NOTIFICATION_DISPATCH_INTERVAL", "1s"), time.Second)),
+		usecase.WithDispatcherAttemptTimeout(parseDuration(getenv("NOTIFICATION_ATTEMPT_TIMEOUT", "10s"), 10*time.Second)))
+	go func() {
+		if runErr := dispatcher.Run(ctx); runErr != nil && !errors.Is(runErr, context.Canceled) {
+			log.Error("delivery dispatcher stopped", zap.Error(runErr))
+		}
+	}()
+
+	consumers := []struct {
+		kind  usecase.HandlerKind
+		topic string
+		group string
+	}{
+		{usecase.HandlerPayments, "payment.events", getenv("NOTIFICATION_PAYMENTS_GROUP", "cbl-notification-payments")},
+		{usecase.HandlerPayouts, "payout.events", getenv("NOTIFICATION_PAYOUTS_GROUP", "cbl-notification-payouts")},
+		{usecase.HandlerRecon, "recon.alerts", getenv("NOTIFICATION_RECON_GROUP", "cbl-notification-recon")},
+	}
+	for _, consumer := range consumers {
+		handler := usecase.NewEventHandler(consumer.kind, store, log)
+		processor := inbox.NewProcessor(consumer.group, db, inbox.NewGuard(), handler,
+			publisher, inbox.NewRouter(consumer.topic, 3), log)
+		runner, runErr := kafkaconsumer.New(brokers, consumer.group, topicWithRetries(consumer.topic), processor, log,
+			kgo.ConsumeResetOffset(kgo.NewOffset().AtEnd()))
+		if runErr != nil {
+			closeAll()
+			return nil, fmt.Errorf("consumer %s: %w", consumer.topic, runErr)
+		}
+		runners = append(runners, runner)
+		go func(topic string, runner *kafkaconsumer.Runner) {
+			if runErr := runner.Run(ctx); runErr != nil && !errors.Is(runErr, context.Canceled) {
+				log.Error("delivery consumer stopped", zap.String("topic", topic), zap.Error(runErr))
+			}
+		}(consumer.topic, runner)
+	}
+	return closeAll, nil
+}
+
+// closeDatabase closes the SQL pool at shutdown.
+func closeDatabase(db *gorm.DB, log *zap.Logger) {
+	if sqlDB, err := db.DB(); err == nil {
+		if closeErr := sqlDB.Close(); closeErr != nil {
+			log.Error("database close failed", zap.Error(closeErr))
+		}
+	}
+}
+
+// topicWithRetries returns the topic and its inbox retry topics.
+func topicWithRetries(main string) []string {
+	return []string{
+		main,
+		main + inbox.RetrySuffix5s,
+		main + inbox.RetrySuffix1m,
+		main + inbox.RetrySuffix10m,
+	}
+}
+
+// splitCSV splits a comma-separated list skipping empty elements.
+func splitCSV(raw string) []string {
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
+}
+
+// parseDuration parses a duration with the fallback.
+func parseDuration(raw string, fallback time.Duration) time.Duration {
+	parsed, err := time.ParseDuration(strings.TrimSpace(raw))
+	if err != nil || parsed <= 0 {
+		return fallback
+	}
+	return parsed
 }
 
 // metricsHandler serves a metrics stub until task 0.7.

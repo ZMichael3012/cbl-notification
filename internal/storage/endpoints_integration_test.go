@@ -52,7 +52,7 @@ func setupNotificationDB(t *testing.T) *gorm.DB {
 
 	var version int64
 	require.NoError(t, db.Raw("SELECT max(version_id) FROM goose_db_version").Scan(&version).Error)
-	assert.Equal(t, int64(1), version, "the webhook_endpoints migration is applied")
+	assert.Equal(t, int64(4), version, "the endpoint, outbox, inbox and delivery migrations are applied")
 	return db
 }
 
@@ -114,6 +114,71 @@ func TestIntegrationRegisterThroughRepository(t *testing.T) {
 	_, err = service.Register(ctx, second)
 	require.Error(t, err)
 	assert.Equal(t, "webhook_endpoint_exists", grpcmw.CodeOf(err))
+}
+
+func TestIntegrationDeliveryJournal(t *testing.T) {
+	db := setupNotificationDB(t)
+	repo := storage.NewEndpointRepository(db)
+	deliveries := storage.NewDeliveryRepository(db)
+	ctx := context.Background()
+
+	require.NoError(t, repo.Insert(ctx, record("0199d6c2-8e3f-7a1b-9c4d-2e5f6a7b8c9d", "key-12345", "hash-1")))
+	endpoint, err := repo.ByMerchantKey(ctx, "0199d6c2-8e3f-7a1b-9c4d-2e5f6a7b8c9d", "key-12345")
+	require.NoError(t, err)
+
+	now := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
+	due := storage.DeliveryRecord{
+		ID: "01a154e0-0000-7000-8000-000000000201", EventID: "evt_01a154e0-0000-7000-8000-000000000202", SourceEventID: "01a154e0-0000-7000-8000-000000000301",
+		MerchantID: "0199d6c2-8e3f-7a1b-9c4d-2e5f6a7b8c9d", EndpointID: endpoint.ID,
+		EventType: "invoice.completed", Body: []byte(`{"id":"evt_01a154e0-0000-7000-8000-000000000202"}`),
+		Status: "pending", NextAttemptAt: &now,
+	}
+	require.NoError(t, deliveries.InsertDelivery(ctx, db, due))
+
+	// A replay of the same source event for the same endpoint is skipped.
+	replay := due
+	replay.ID = "01a154e0-0000-7000-8000-000000000205"
+	replay.EventID = "evt_01a154e0-0000-7000-8000-000000000206"
+	require.NoError(t, deliveries.InsertDelivery(ctx, db, replay))
+	var deduped int64
+	require.NoError(t, db.Raw("SELECT count(*) FROM webhook_deliveries WHERE source_event_id = ?", due.SourceEventID).Scan(&deduped).Error)
+	assert.Equal(t, int64(1), deduped, "a source-event replay is deduplicated")
+
+	future := now.Add(2 * time.Hour)
+	notDue := due
+	notDue.ID = "01a154e0-0000-7000-8000-000000000203"
+	notDue.EventID = "evt_01a154e0-0000-7000-8000-000000000204"
+	notDue.SourceEventID = "01a154e0-0000-7000-8000-000000000302"
+	notDue.NextAttemptAt = &future
+	require.NoError(t, deliveries.InsertDelivery(ctx, db, notDue))
+
+	claimed, err := deliveries.ClaimDue(ctx, now, 15*time.Second, 10)
+	require.NoError(t, err)
+	require.Len(t, claimed, 1, "only the due delivery is claimed")
+	assert.Equal(t, due.ID, claimed[0].ID)
+
+	// The claim lease prevents an immediate second claim.
+	again, err := deliveries.ClaimDue(ctx, now, 15*time.Second, 10)
+	require.NoError(t, err)
+	assert.Empty(t, again)
+
+	require.NoError(t, deliveries.RecordAttempt(ctx, storage.AttemptRecord{
+		DeliveryID: due.ID, Attempt: 1, SentAt: now, HTTPStatus: 500, Error: "boom",
+	}))
+	require.NoError(t, deliveries.ScheduleRetry(ctx, due.ID, 1, now.Add(time.Second), "boom"))
+	claimed, err = deliveries.ClaimDue(ctx, now.Add(2*time.Second), 15*time.Second, 10)
+	require.NoError(t, err)
+	require.Len(t, claimed, 1)
+	assert.Equal(t, 1, claimed[0].Attempts)
+
+	require.NoError(t, deliveries.MarkDelivered(ctx, due.ID, 2))
+	claimed, err = deliveries.ClaimDue(ctx, now.Add(time.Hour), 15*time.Second, 10)
+	require.NoError(t, err)
+	assert.Empty(t, claimed, "a delivered row is not claimed")
+
+	var journal int64
+	require.NoError(t, db.Raw("SELECT count(*) FROM webhook_delivery_attempts WHERE delivery_id = ?", due.ID).Scan(&journal).Error)
+	assert.Equal(t, int64(1), journal)
 }
 
 func TestIntegrationEndpointRoundTrip(t *testing.T) {

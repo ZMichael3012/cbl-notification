@@ -109,13 +109,24 @@ func ValidateURL(raw string) error {
 		strings.HasSuffix(host, ".local") || strings.HasSuffix(host, ".internal") {
 		return grpcmw.E(grpcmw.KindInvalidArgument, "invalid_url", "internal host names are not allowed", nil)
 	}
-	if ip := net.ParseIP(host); ip != nil {
-		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
-			ip.IsUnspecified() || ip.IsMulticast() || inRange(ip, cgnatRange) || inRange(ip, thisNetworkRange) {
-			return grpcmw.E(grpcmw.KindInvalidArgument, "invalid_url", "internal addresses are not allowed", nil)
-		}
+	if ip := net.ParseIP(host); ip != nil && !IsPublicIP(ip) {
+		return grpcmw.E(grpcmw.KindInvalidArgument, "invalid_url", "internal addresses are not allowed", nil)
 	}
 	return nil
+}
+
+// IsPublicIP reports whether the address is a globally routable unicast address:
+// loopback, private, link-local, multicast, unspecified, CGNAT and "this
+// network" ranges are internal. The delivery guard uses the same rule.
+func IsPublicIP(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+		ip.IsUnspecified() || ip.IsMulticast() || inRange(ip, cgnatRange) || inRange(ip, thisNetworkRange) {
+		return false
+	}
+	return true
 }
 
 // cgnatRange sets 100.64.0.0/10 (carrier-grade NAT, not covered by IsPrivate).

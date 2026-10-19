@@ -89,6 +89,32 @@ func (r *EndpointRepository) ByMerchantKey(ctx context.Context, merchantID, key 
 	return record, nil
 }
 
+// ByID returns the endpoint by its identifier.
+func (r *EndpointRepository) ByID(ctx context.Context, id string) (EndpointRecord, error) {
+	var record EndpointRecord
+	err := r.db.WithContext(ctx).Where("id = ?", id).Take(&record).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return EndpointRecord{}, ErrNotFound
+	}
+	if err != nil {
+		return EndpointRecord{}, fmt.Errorf("storage: load endpoint: %w", err)
+	}
+	return record, nil
+}
+
+// ListEndpoints returns every endpoint of the merchant in a deterministic order.
+func (r *EndpointRepository) ListEndpoints(ctx context.Context, merchantID string) ([]EndpointRecord, error) {
+	records := make([]EndpointRecord, 0)
+	err := r.db.WithContext(ctx).
+		Where("merchant_id = ?", merchantID).
+		Order("created_at, id").
+		Find(&records).Error
+	if err != nil {
+		return nil, fmt.Errorf("storage: list endpoints: %w", err)
+	}
+	return records, nil
+}
+
 // isUniqueViolation reports the PostgreSQL unique violation (SQLSTATE 23505).
 func isUniqueViolation(err error) bool {
 	var pgErr *pgconn.PgError
