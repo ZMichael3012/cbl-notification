@@ -18,11 +18,11 @@ import (
 	"google.golang.org/protobuf/proto"
 	"gorm.io/gorm"
 
-	eventsv1 "github.com/cbl/cbl-protos/gen/go/billing/events/v1"
+	eventsv1 "github.com/ZMichael3012/cbl-protos/gen/go/billing/events/v1"
 
-	"github.com/cbl/cbl-kit/hmac"
-	"github.com/cbl/cbl-kit/inbox"
-	"github.com/cbl/cbl-kit/outbox"
+	"github.com/ZMichael3012/cbl-kit/hmac"
+	"github.com/ZMichael3012/cbl-kit/inbox"
+	"github.com/ZMichael3012/cbl-kit/outbox"
 
 	"github.com/cbl/cbl-notification/internal/domain"
 	"github.com/cbl/cbl-notification/internal/storage"

@@ -9,11 +9,11 @@ import (
 
 	"github.com/google/uuid"
 
-	commonv1 "github.com/cbl/cbl-protos/gen/go/billing/common/v1"
-	eventsv1 "github.com/cbl/cbl-protos/gen/go/billing/events/v1"
+	commonv1 "github.com/ZMichael3012/cbl-protos/gen/go/billing/common/v1"
+	eventsv1 "github.com/ZMichael3012/cbl-protos/gen/go/billing/events/v1"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"github.com/cbl/cbl-kit/money"
+	"github.com/ZMichael3012/cbl-kit/money"
 )
 
 // ErrInvalidEvent reports an unmappable or malformed platform event.

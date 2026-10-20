@@ -8,14 +8,14 @@ import (
 	"testing"
 	"time"
 
-	commonv1 "github.com/cbl/cbl-protos/gen/go/billing/common/v1"
-	eventsv1 "github.com/cbl/cbl-protos/gen/go/billing/events/v1"
+	commonv1 "github.com/ZMichael3012/cbl-protos/gen/go/billing/common/v1"
+	eventsv1 "github.com/ZMichael3012/cbl-protos/gen/go/billing/events/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"github.com/cbl/cbl-kit/inbox"
+	"github.com/ZMichael3012/cbl-kit/inbox"
 
 	"github.com/cbl/cbl-notification/internal/storage"
 	"github.com/cbl/cbl-notification/internal/usecase"

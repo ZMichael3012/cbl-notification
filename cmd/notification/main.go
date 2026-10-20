@@ -24,11 +24,11 @@ import (
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 
-	"github.com/cbl/cbl-kit/grpcmw"
-	"github.com/cbl/cbl-kit/inbox"
-	"github.com/cbl/cbl-kit/inbox/kafkaconsumer"
-	"github.com/cbl/cbl-kit/outbox/kafkapub"
-	"github.com/cbl/cbl-kit/storagex"
+	"github.com/ZMichael3012/cbl-kit/grpcmw"
+	"github.com/ZMichael3012/cbl-kit/inbox"
+	"github.com/ZMichael3012/cbl-kit/inbox/kafkaconsumer"
+	"github.com/ZMichael3012/cbl-kit/outbox/kafkapub"
+	"github.com/ZMichael3012/cbl-kit/storagex"
 
 	"github.com/cbl/cbl-notification/internal/domain"
 	"github.com/cbl/cbl-notification/internal/storage"

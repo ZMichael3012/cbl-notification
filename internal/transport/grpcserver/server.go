@@ -12,9 +12,9 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	notificationv1 "github.com/cbl/cbl-protos/gen/go/billing/notification/v1"
+	notificationv1 "github.com/ZMichael3012/cbl-protos/gen/go/billing/notification/v1"
 
-	"github.com/cbl/cbl-kit/grpcmw"
+	"github.com/ZMichael3012/cbl-kit/grpcmw"
 
 	"github.com/cbl/cbl-notification/internal/domain"
 	"github.com/cbl/cbl-notification/internal/storage"
