@@ -15,7 +15,7 @@ vet:
 
 # lint mounts the repository; the modules come from the GitHub origin (Go proxy).
 lint:
-	docker run --rm -v "$(CURDIR)":/src -w /src golangci/golangci-lint:latest-alpine golangci-lint run ./...
+	docker run --rm -v "$(CURDIR)":/src -w /src golangci/golangci-lint:v2.14.0-alpine golangci-lint run ./...
 
 fmt:
 	gofmt -l .
